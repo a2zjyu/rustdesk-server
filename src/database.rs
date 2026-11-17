@@ -126,13 +126,13 @@ impl Database {
     pub async fn update_pk(
         &self,
         guid: &Vec<u8>,
-        id: &str,
         pk: &[u8],
         info: &str,
     ) -> ResultType<()> {
+        // The id is left alone: a registration that was in flight for the old id
+        // must not undo update_id().
         sqlx::query!(
-            "update peer set id=?, pk=?, info=? where guid=?",
-            id,
+            "update peer set pk=?, info=? where guid=?",
             pk,
             info,
             guid
@@ -143,9 +143,12 @@ impl Database {
     }
 
     pub async fn update_id(&self, guid: &Vec<u8>, id: &str) -> ResultType<()> {
-        sqlx::query!("update peer set id=? where guid=?", id, guid)
+        let res = sqlx::query!("update peer set id=? where guid=?", id, guid)
             .execute(self.pool.get().await?.deref_mut())
             .await?;
+        if res.rows_affected() == 0 {
+            hbb_common::bail!("no peer row to rename");
+        }
         Ok(())
     }
 }

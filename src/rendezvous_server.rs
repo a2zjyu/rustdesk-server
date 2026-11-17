@@ -989,7 +989,7 @@ impl RendezvousServer {
         if !self.check_ip_blocker(&addr.ip().to_string(), &rk.id).await {
             return TOO_FREQUENT;
         }
-        let res = self.pm.change_id(&rk.old_id, &rk.id, &rk.uuid).await;
+        let res = self.pm.change_id(&rk.old_id, &rk.id, &rk.uuid, addr.ip()).await;
         log::info!("change_id {} -> {} from {}: {:?}", rk.old_id, rk.id, addr, res);
         res
     }

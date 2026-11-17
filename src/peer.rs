@@ -8,7 +8,13 @@ use hbb_common::{
     ResultType,
 };
 use serde_derive::{Deserialize, Serialize};
-use std::{collections::HashMap, collections::HashSet, net::SocketAddr, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    collections::HashSet,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Instant,
+};
 
 type IpBlockMap = HashMap<String, ((u32, Instant), (HashSet<String>, Instant))>;
 type UserStatusMap = HashMap<Vec<u8>, Arc<(Option<Vec<u8>>, bool)>>;
@@ -126,7 +132,7 @@ impl PeerMap {
                 }
             }
         } else {
-            if let Err(err) = self.db.update_pk(&guid, &id, &pk, &info_str).await {
+            if let Err(err) = self.db.update_pk(&guid, &pk, &info_str).await {
                 log::error!("db.update_pk failed: {}", err);
                 return register_pk_response::Result::SERVER_ERROR;
             }
@@ -140,6 +146,7 @@ impl PeerMap {
         old_id: &str,
         id: &str,
         uuid: &[u8],
+        ip: IpAddr,
     ) -> register_pk_response::Result {
         let peer = match self.get(old_id).await {
             Some(peer) => peer,
@@ -147,13 +154,32 @@ impl PeerMap {
         };
         let guid = {
             let peer = peer.read().await;
-            if peer.guid.is_empty() || peer.uuid.is_empty() || peer.uuid[..] != *uuid {
+            // The uuid is not a secret (it travels in clear over UDP), so the request
+            // must also come from the address the peer last registered from.
+            let same_ip = peer
+                .info
+                .ip
+                .parse::<IpAddr>()
+                .map_or(false, |x| x.to_canonical() == ip.to_canonical());
+            if peer.guid.is_empty()
+                || peer.uuid.is_empty()
+                || peer.uuid[..] != *uuid
+                || !same_ip
+            {
                 return register_pk_response::Result::UUID_MISMATCH;
             }
             peer.guid.clone()
         };
+        // Loads the row of the new id into the map, if there is one.
+        self.get(id).await;
+        // The map stays locked from the checks to the key move, so that two renames
+        // of the same peer cannot both succeed.
+        let mut map = self.map.write().await;
+        if !map.get(old_id).map_or(false, |p| Arc::ptr_eq(p, &peer)) {
+            return register_pk_response::Result::UUID_MISMATCH;
+        }
         // get_or() leaves an entry with no uuid for an id that never finished registering.
-        if let Some(other) = self.get(id).await {
+        if let Some(other) = map.get(id) {
             if !other.read().await.uuid.is_empty() {
                 return register_pk_response::Result::ID_EXISTS;
             }
@@ -162,7 +188,6 @@ impl PeerMap {
             log::error!("db.update_id failed: {}", err);
             return register_pk_response::Result::SERVER_ERROR;
         }
-        let mut map = self.map.write().await;
         map.remove(old_id);
         map.insert(id.to_owned(), peer);
         register_pk_response::Result::OK
@@ -234,22 +259,41 @@ mod tests {
         let db = dir.path().join("db.sqlite3");
         let mut pm = peer_map(&db).await;
         let addr = "127.0.0.1:1".parse().unwrap();
-        for (id, uuid) in [("111111", "u1"), ("222222", "u2")] {
+        for (id, uuid, ip) in [("111111", "u1", "1.1.1.1"), ("222222", "u2", "2.2.2.2")] {
             let peer = pm.get_or(id).await;
             let res = pm
-                .update_pk(id.to_owned(), peer, addr, uuid.into(), "pk".into(), "".to_owned())
+                .update_pk(id.to_owned(), peer, addr, uuid.into(), "pk".into(), ip.to_owned())
                 .await;
             assert_eq!(res, OK);
         }
+        let ip1: IpAddr = "1.1.1.1".parse().unwrap();
+        let ip2: IpAddr = "2.2.2.2".parse().unwrap();
+        let ip1_mapped: IpAddr = "::ffff:1.1.1.1".parse().unwrap();
+        let registering = pm.get("111111").await.unwrap();
 
-        assert_eq!(pm.change_id("111111", "office-pc", b"u2").await, UUID_MISMATCH);
-        assert_eq!(pm.change_id("333333", "office-pc", b"u1").await, UUID_MISMATCH);
-        assert_eq!(pm.change_id("111111", "222222", b"u1").await, ID_EXISTS);
+        assert_eq!(pm.change_id("111111", "office-pc", b"u2", ip1).await, UUID_MISMATCH);
+        assert_eq!(pm.change_id("111111", "office-pc", b"u1", ip2).await, UUID_MISMATCH);
+        assert_eq!(pm.change_id("333333", "office-pc", b"u1", ip1).await, UUID_MISMATCH);
+        assert_eq!(pm.change_id("111111", "222222", b"u1", ip1).await, ID_EXISTS);
         // An id that was only looked up, never registered, is still free.
         pm.get_or("office-pc").await;
-        assert_eq!(pm.change_id("111111", "office-pc", b"u1").await, OK);
+        assert_eq!(pm.change_id("111111", "office-pc", b"u1", ip1_mapped).await, OK);
+        assert_eq!(pm.change_id("111111", "other-pc", b"u1", ip1).await, UUID_MISMATCH);
         assert!(pm.get("111111").await.is_none());
         assert_eq!(pm.get("office-pc").await.unwrap().read().await.uuid, "u1");
+
+        // A registration that was already in flight for the old id must not undo the rename.
+        let res = pm
+            .update_pk(
+                "111111".to_owned(),
+                registering,
+                addr,
+                "u1".into(),
+                "pk2".into(),
+                "1.1.1.1".to_owned(),
+            )
+            .await;
+        assert_eq!(res, OK);
 
         let reopened = peer_map(&db).await;
         assert!(reopened.get("111111").await.is_none());
