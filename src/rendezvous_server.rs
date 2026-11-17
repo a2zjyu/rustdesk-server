@@ -648,8 +648,12 @@ impl RendezvousServer {
                     msg_out.set_test_nat_response(res);
                     Self::send_to_sink(sink, msg_out).await;
                 }
-                Some(rendezvous_message::Union::RegisterPk(_)) => {
-                    let res = register_pk_response::Result::NOT_SUPPORT;
+                Some(rendezvous_message::Union::RegisterPk(rk)) => {
+                    let res = if rk.old_id.is_empty() {
+                        register_pk_response::Result::NOT_SUPPORT
+                    } else {
+                        self.change_id(&rk, addr).await
+                    };
                     let mut msg_out = RendezvousMessage::new();
                     msg_out.set_register_pk_response(RegisterPkResponse {
                         result: res.into(),
@@ -973,6 +977,21 @@ impl RendezvousServer {
             },
         ))?;
         Ok(())
+    }
+
+    async fn change_id(&self, rk: &RegisterPk, addr: SocketAddr) -> register_pk_response::Result {
+        if rk.uuid.is_empty() || rk.old_id.len() > MAX_PEER_ID_LEN {
+            return UUID_MISMATCH;
+        }
+        if !hbb_common::is_valid_custom_id(&rk.id) {
+            return register_pk_response::Result::INVALID_ID_FORMAT;
+        }
+        if !self.check_ip_blocker(&addr.ip().to_string(), &rk.id).await {
+            return TOO_FREQUENT;
+        }
+        let res = self.pm.change_id(&rk.old_id, &rk.id, &rk.uuid).await;
+        log::info!("change_id {} -> {} from {}: {:?}", rk.old_id, rk.id, addr, res);
+        res
     }
 
     async fn check_ip_blocker(&self, ip: &str, id: &str) -> bool {

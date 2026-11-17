@@ -135,6 +135,39 @@ impl PeerMap {
         register_pk_response::Result::OK
     }
 
+    pub(crate) async fn change_id(
+        &self,
+        old_id: &str,
+        id: &str,
+        uuid: &[u8],
+    ) -> register_pk_response::Result {
+        let peer = match self.get(old_id).await {
+            Some(peer) => peer,
+            None => return register_pk_response::Result::UUID_MISMATCH,
+        };
+        let guid = {
+            let peer = peer.read().await;
+            if peer.guid.is_empty() || peer.uuid.is_empty() || peer.uuid[..] != *uuid {
+                return register_pk_response::Result::UUID_MISMATCH;
+            }
+            peer.guid.clone()
+        };
+        // get_or() leaves an entry with no uuid for an id that never finished registering.
+        if let Some(other) = self.get(id).await {
+            if !other.read().await.uuid.is_empty() {
+                return register_pk_response::Result::ID_EXISTS;
+            }
+        }
+        if let Err(err) = self.db.update_id(&guid, id).await {
+            log::error!("db.update_id failed: {}", err);
+            return register_pk_response::Result::SERVER_ERROR;
+        }
+        let mut map = self.map.write().await;
+        map.remove(old_id);
+        map.insert(id.to_owned(), peer);
+        register_pk_response::Result::OK
+    }
+
     #[inline]
     pub(crate) async fn get(&self, id: &str) -> Option<LockPeer> {
         let p = self.map.read().await.get(id).cloned();
@@ -179,5 +212,47 @@ impl PeerMap {
     #[inline]
     pub(crate) async fn is_in_memory(&self, id: &str) -> bool {
         self.map.read().await.contains_key(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbb_common::tokio;
+    use register_pk_response::Result::{ID_EXISTS, OK, UUID_MISMATCH};
+
+    async fn peer_map(db: &std::path::Path) -> PeerMap {
+        PeerMap {
+            map: Default::default(),
+            db: database::Database::new(db.to_str().unwrap()).await.unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn change_id_renames_only_for_the_owner_and_to_a_free_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("db.sqlite3");
+        let mut pm = peer_map(&db).await;
+        let addr = "127.0.0.1:1".parse().unwrap();
+        for (id, uuid) in [("111111", "u1"), ("222222", "u2")] {
+            let peer = pm.get_or(id).await;
+            let res = pm
+                .update_pk(id.to_owned(), peer, addr, uuid.into(), "pk".into(), "".to_owned())
+                .await;
+            assert_eq!(res, OK);
+        }
+
+        assert_eq!(pm.change_id("111111", "office-pc", b"u2").await, UUID_MISMATCH);
+        assert_eq!(pm.change_id("333333", "office-pc", b"u1").await, UUID_MISMATCH);
+        assert_eq!(pm.change_id("111111", "222222", b"u1").await, ID_EXISTS);
+        // An id that was only looked up, never registered, is still free.
+        pm.get_or("office-pc").await;
+        assert_eq!(pm.change_id("111111", "office-pc", b"u1").await, OK);
+        assert!(pm.get("111111").await.is_none());
+        assert_eq!(pm.get("office-pc").await.unwrap().read().await.uuid, "u1");
+
+        let reopened = peer_map(&db).await;
+        assert!(reopened.get("111111").await.is_none());
+        assert_eq!(reopened.get("office-pc").await.unwrap().read().await.uuid, "u1");
     }
 }
