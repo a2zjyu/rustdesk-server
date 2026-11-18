@@ -1,0 +1,4 @@
+target
+.git
+libs/hbb_common/.git
+src/version.rs
