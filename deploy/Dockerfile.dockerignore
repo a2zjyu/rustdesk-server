@@ -1,0 +1,14 @@
+# 허용 목록: 빌드에 필요한 것만 보낸다.
+# git 에서 제외된 로컬 파일(id_ed25519 개인키, db_v2.sqlite3-wal 등)이 섞이지 않게 한다.
+*
+!Cargo.toml
+!Cargo.lock
+!build.rs
+!.env
+!db_v2.sqlite3
+!src
+!libs
+!tests
+**/target
+**/.git
+src/version.rs
