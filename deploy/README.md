@@ -8,10 +8,11 @@ cd rustdesk-server
 deploy/build.sh        # → a2z/rustdesk-server:<커밋12자리>
 ```
 
-- 커밋 안 된 변경이 있거나 하위 모듈(`libs/hbb_common`)이 준비되지 않았으면 빌드를 거부한다.
+- 커밋 안 된 변경이 있거나, 하위 모듈(`libs/hbb_common`)이 준비되지 않았거나, 같은 태그의 이미지가 이미 있으면 빌드를 거부한다.
+- 빌드에는 `deploy/Dockerfile.dockerignore`에 허용한 파일만 보낸다. 로컬에서 생긴 `id_ed25519`, `db_v2.sqlite3-wal` 같은 파일은 들어가지 않는다.
 - 실행 이미지는 `FROM scratch`에 `hbbs`, `hbbr`만 담는다. 공식 classic 이미지와 같은 구조라 기존 compose 설정(비root 1001, 읽기 전용, `./data:/root`)을 그대로 쓴다.
-- 빌드 단계의 `target/`은 캐시하지 않는다. 캐시가 남으면 `build.rs`가 다시 돌지 않아 `src/version.rs`가 빠지고 컴파일이 실패한다.
-- 테스트는 `cargo test --lib`으로 돈다. `--bin hbbs`로 돌리면 0개가 실행된다.
+- `target/`과 cargo 내려받기 폴더는 BuildKit 캐시에 남긴다. `build.rs`가 `src/version.rs`를 감시하므로 캐시가 있어도 새 소스에서는 이 파일을 다시 만든다.
+- 테스트는 dev 프로필로 `cargo test --lib --tests`를 돌린다. `--bin hbbs`로 돌리면 0개가 실행되고, `--lib`만 쓰면 `tests/protobuf_recursion.rs`가 빠진다.
 
 ## 배포
 

@@ -5,12 +5,19 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 [[ -z "$(git status --porcelain)" ]] || { echo "커밋 안 된 변경이 있습니다" >&2; exit 1; }
 # 하위 모듈이 비어 있거나(-) 기록된 커밋과 다르면(+) 거부
-if git submodule status | grep -q '^[-+U]'; then
+# (pipefail 에서 grep -q 가 먼저 끝나면 SIGPIPE 로 검사가 건너뛰어지므로 출력을 먼저 받는다)
+SUBMODULES=$(git submodule status)
+if grep -q '^[-+U]' <<<"$SUBMODULES"; then
   echo "하위 모듈이 준비되지 않았습니다: git submodule update --init" >&2
   exit 1
 fi
 REV=$(git rev-parse --short=12 HEAD)
 TAG="a2z/rustdesk-server:$REV"
+# 같은 태그를 다른 이미지로 덮어쓰지 않는다 (되돌리기 기준이 흐려짐)
+if docker image inspect "$TAG" >/dev/null 2>&1; then
+  echo "$TAG 이미지가 이미 있습니다. 다시 빌드하려면 먼저 지우세요: docker rmi $TAG" >&2
+  exit 1
+fi
 echo "빌드: $TAG ($(git log --oneline -1))"
 DOCKER_BUILDKIT=1 docker build --progress=plain \
   --label org.opencontainers.image.source=https://github.com/a2zjyu/rustdesk-server \
